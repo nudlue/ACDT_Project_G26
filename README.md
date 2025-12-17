@@ -1,6 +1,8 @@
 # ACDT_Project_G26
 It includes the information about how to run our products.
 
+Our model on web: https://teachablemachine.withgoogle.com/models/tWu4jmNKd/
+
 how to run
 https://youtu.be/gOYJuCf96Vw
 
@@ -18,3 +20,4 @@ Following instructions
 5. Open other termial.
 6. Type python3 [file name].py
 7. Then it will work
+*You can change the model, img and code whatever for your purpose. For example, if you want that the customized model classify your own phone ringing sound, then you can follow the how to run video: train model new, upload again and change the code(not only model name but also labels should be changed.
