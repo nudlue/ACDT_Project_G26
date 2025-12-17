@@ -1,0 +1,188 @@
+import cv2
+import mediapipe as mp
+import time
+import math
+import sys
+
+# 1. Import Drivers and Initialize
+try:
+    from Raspbot_Lib import Raspbot
+    import PID
+    from McLumk_Wheel_Sports import *
+except ImportError as e:
+    print(f"Error importing libraries: {e}")
+    sys.exit(1)
+
+# Create Bot Object
+bot = Raspbot()
+
+# --- Configuration Constants ---
+NEAR_DISTANCE = 150     # Backup threshold in mm
+FORWARD_SPEED = 20      # Forward Speed
+TURN_SPEED = 20         # Face Tracking Rotation Speed
+SEARCH_SPEED = 10       # Search Rotation Speed
+
+# Zoom Configuration
+ZOOM_FACTOR = 1        # 1.0 = Original, 1.5 = 1.5x Zoom, 2.0 = 2x Zoom
+
+# Angles and Control Constants
+FIXED_TILT_ANGLE = 70   # Fixed Vertical Angle
+FIXED_PAN_ANGLE = 90    # Fixed Horizontal Angle (Center)
+CENTER_DEADZONE = 40    # Center Deadzone
+
+def robot_startup():
+    """Robot startup: Fix servos and stop motors"""
+    bot.Ctrl_Servo(1, FIXED_PAN_ANGLE)   
+    bot.Ctrl_Servo(2, FIXED_TILT_ANGLE)  
+    stop_robot()
+
+def get_distance():
+    try:
+        diss_H = bot.read_data_array(0x1b, 1)[0]
+        diss_L = bot.read_data_array(0x1a, 1)[0]
+        dis = diss_H << 8 | diss_L
+        return dis
+    except:
+        return 9999
+
+# --- Helper Function: Digital Zoom ---
+def apply_zoom(frame, scale=1.0):
+    if scale <= 1.0:
+        return frame 
+
+    h, w, _ = frame.shape
+    new_w = int(w / scale)
+    new_h = int(h / scale)
+
+    x = (w - new_w) // 2
+    y = (h - new_h) // 2
+
+    roi = frame[y:y+new_h, x:x+new_w]
+    zoomed_frame = cv2.resize(roi, (w, h), interpolation=cv2.INTER_LINEAR)
+    
+    return zoomed_frame
+# 2. Face Detector Class
+class FaceDetector:
+    def __init__(self, minDetectionCon=0.5):
+        self.mpFaceDetection = mp.solutions.face_detection
+        self.mpDraw = mp.solutions.drawing_utils
+        self.facedetection = self.mpFaceDetection.FaceDetection(
+            min_detection_confidence=minDetectionCon, 
+            model_selection=0
+        )
+
+    def findFaces(self, frame):
+        img_RGB = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self.results = self.facedetection.process(img_RGB)
+        bboxs = []
+        bbox = 0, 0, 0, 0
+        center_x = 0
+
+        if self.results.detections:
+            for id, detection in enumerate(self.results.detections):
+                bboxC = detection.location_data.relative_bounding_box
+                ih, iw, ic = frame.shape
+                bbox = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
+                       int(bboxC.width * iw), int(bboxC.height * ih)
+                center_x = bbox[0] + bbox[2] // 2
+                bboxs.append([id, bbox, detection.score])
+                frame = self.fancyDraw(frame, bbox)
+
+        return frame, bboxs, self.results.detections, bbox, center_x
+
+    def fancyDraw(self, frame, bbox, l=30, t=5):
+        x, y, w, h = bbox
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        return frame
+# 3. Main Logic Loop
+def run_main_logic():
+    
+    cap = cv2.VideoCapture(0)
+    cap.set(3, 320)
+    cap.set(4, 240)
+    
+    detector = FaceDetector(0.6)
+    
+    bot.Ctrl_Ulatist_Switch(1)
+    bot.Ctrl_Servo(1, FIXED_PAN_ANGLE)
+    bot.Ctrl_Servo(2, FIXED_TILT_ANGLE) 
+    
+    time.sleep(0.5) 
+
+    print(f"System Started with Zoom Level: {ZOOM_FACTOR}x")
+
+    try:
+        while True:
+            # --- [Step 1] Obstacle Detection ---
+            dis = get_distance()
+            
+            # Backup if too close (< NEAR_DISTANCE)
+            if dis < NEAR_DISTANCE:
+                print(f"BACKUP! Too Close: {dis}mm")
+                move_backward(TURN_SPEED) # Reverted to moving backward
+                
+                time.sleep(0.1)
+                
+                # Keep showing video feed even when backing up
+                ret, frame = cap.read() 
+                if ret: 
+                    frame = apply_zoom(frame, ZOOM_FACTOR)
+                    cv2.putText(frame, "OBSTACLE BACKUP", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    cv2.imshow("Robot View", frame)
+                
+                if cv2.waitKey(1) & 0xFF == ord('q'): break
+                continue  # Restart loop, skip face detection
+
+            # --- [Step 2] Face Detection & Body Control ---
+            ret, frame = cap.read()
+            if not ret: break
+
+            frame = apply_zoom(frame, ZOOM_FACTOR)
+            frame, _, descore, bbox, center_x = detector.findFaces(frame)
+            
+            SCREEN_CENTER_X = 160
+            
+            if descore: 
+                # --- [A] Face Detected ---
+                
+                if center_x < (SCREEN_CENTER_X - CENTER_DEADZONE):
+                    rotate_left(TURN_SPEED)
+                    cv2.putText(frame, "<< LEFT", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    
+                elif center_x > (SCREEN_CENTER_X + CENTER_DEADZONE):
+                    rotate_right(TURN_SPEED)
+                    cv2.putText(frame, "RIGHT >>", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    
+                else:
+                    move_forward(FORWARD_SPEED)
+                    cv2.putText(frame, "^ FORWARD ^", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                cv2.putText(frame, f"Tracking: {center_x}", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                cv2.putText(frame, f"ZOOM: x{ZOOM_FACTOR}", (200, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+            else: 
+                # --- [B] No Face -> Search Mode ---
+                # Rotate to find face
+                rotate_left(SEARCH_SPEED) 
+                cv2.putText(frame, "SEARCHING...", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            cv2.imshow("Robot View", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+    except KeyboardInterrupt:
+        print("User Interrupt")
+
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        bot.Ctrl_Ulatist_Switch(0) 
+        robot_startup() 
+        stop_robot()
+        print("Program Exited.")
+if __name__ == '__main__':
+    robot_startup()
+    run_main_logic()

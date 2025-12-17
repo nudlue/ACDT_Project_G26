@@ -1,0 +1,226 @@
+import pygame
+import sounddevice as sd
+import numpy as np
+import os
+import math
+import time
+import sys
+# --------------------------------------------------
+# Add robot driver library path and import
+# --------------------------------------------------
+sys.path.append('/home/pi/project_demo/lib')
+try:
+    from McLumk_Wheel_Sports import *
+except ImportError:
+    print("Warning: Robot driver library not found. Running in test mode.")
+    def move_forward(speed): pass
+    def move_backward(speed): pass
+    def rotate_left(speed): pass
+    def rotate_right(speed): pass
+    def stop_robot(): pass
+    class MockBot:
+        def Ctrl_Servo(self, id, angle): pass
+    bot = MockBot()
+# --------------------------------------------------
+# TFLite and Settings
+# --------------------------------------------------
+try:
+    import tflite_runtime.interpreter as tflite
+except ImportError:
+    try:
+        import tensorflow.lite as tflite
+    except ImportError:
+        print("Error: tflite_runtime or tensorflow is not installed.")
+        exit()
+# [Change 1] Updated Model Folder
+MODEL_FOLDER = "model"
+# [Change 2] Updated Icon Folder
+ICON_FOLDER = "Img2"
+MODEL_FILE = "soundclassifier_with_metadata.tflite"
+model_path = os.path.join(MODEL_FOLDER, MODEL_FILE)
+SR = 44100
+BLOCK_MS = 250
+block_size = int(SR * BLOCK_MS / 1000)
+# Pygame Init
+pygame.init()
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 480
+screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("Razbot UI")
+font_large = pygame.font.SysFont(None, 90)
+font_small = pygame.font.SysFont(None, 40)
+clock = pygame.time.Clock()
+# Load Model
+if not os.path.exists(model_path):
+    print("Model missing:", model_path)
+    pygame.quit()
+    exit()
+# [Change 3] Removed "Baby Crying"
+# Ensure your new model (model2.2) is trained with these exact labels in this order.
+LABELS = [
+    "Clap",
+    "Doorbell",
+    "Siren",
+    "Background"
+]
+interpreter = tflite.Interpreter(model_path=model_path)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+expected_samples = input_details[0]["shape"][1]
+# Icon Loading
+def load_icon(filename, scale=200):
+    path = os.path.join(ICON_FOLDER, filename)
+    try:
+        img = pygame.image.load(path).convert_alpha()
+        return pygame.transform.smoothscale(img, (scale, scale))
+    except:
+        return None
+ICONS = {
+    "Clap": load_icon("Clap.png"),
+    "Doorbell": load_icon("Doorbell.png"),
+    "Siren": load_icon("Siren.png"),
+    "Background": load_icon("Background.png")
+}
+# [Change 4] Removed "Baby Crying" color
+EVENT_COLORS = {
+    "Clap": (250, 250, 255),
+    "Doorbell": (255, 220, 100),
+    "Siren": (255, 80, 80),
+    "Background": (50, 120, 70)
+}
+# --------------------------------------------------
+# State Variables
+# --------------------------------------------------
+current_label = "Background"
+current_score = 0.0
+audio_buffer = np.zeros(expected_samples, dtype=np.float32)
+t_start = time.time()
+is_acting = False
+# --------------------------------------------------
+# Robot Action Definition
+# --------------------------------------------------
+def perform_robot_action(label):
+    global is_acting
+    if label == "Background" or is_acting:
+        return
+    print(f"Action Start: {label}")
+    is_acting = True
+    MOVE_SPEED = 40
+    try:
+        if label == "Doorbell":
+            # [Spin around]
+            rotate_left(MOVE_SPEED)
+            time.sleep(2.5)
+            stop_robot()
+        elif label == "Siren":
+            # [Move forward then backward]
+            move_forward(MOVE_SPEED)
+            time.sleep(1.0)
+            stop_robot()
+            time.sleep(0.2)
+            move_backward(MOVE_SPEED)
+            time.sleep(1.0)
+            stop_robot()
+        elif label == "Clap":
+            # [Nod]
+            initial_pos = 25
+            nod_down = 60
+            for _ in range(2):
+                bot.Ctrl_Servo(2, nod_down)
+                time.sleep(0.4)
+                bot.Ctrl_Servo(2, initial_pos)
+                time.sleep(0.4)
+    except Exception as e:
+        print(f"Robot Control Error: {e}")
+        stop_robot()
+    print("Action Finished")
+    is_acting = False
+# --------------------------------------------------
+# Audio Callback
+# --------------------------------------------------
+def audio_callback(indata, frames, time_info, status):
+    global current_label, current_score, audio_buffer
+    if is_acting:
+        return
+    new_data = np.array(indata[:, 0], dtype=np.float32)
+    if len(new_data) >= expected_samples:
+        audio_buffer = new_data[-expected_samples:]
+    else:
+        audio_buffer = np.roll(audio_buffer, -len(new_data))
+        audio_buffer[-len(new_data):] = new_data
+    input_data = np.expand_dims(audio_buffer, axis=0).astype(np.float32)
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+    interpreter.invoke()
+    output = interpreter.get_tensor(output_details[0]["index"])
+    idx = int(np.argmax(output))
+    score = float(output[0][idx])
+    if score > 0.90 and idx < len(LABELS):
+        current_label = LABELS[idx]
+        current_score = score
+    else:
+        pass
+# --------------------------------------------------
+# Graphics Functions
+# --------------------------------------------------
+def draw_glow_background(label, elapsed):
+    base = EVENT_COLORS.get(label, (0, 0, 0))
+    pulse = (math.sin(elapsed * 2) + 1) / 2
+    pulse_strength = 0.35 + pulse * 0.65
+    r, g, b = [int(c * pulse_strength) for c in base]
+    screen.fill((r, g, b))
+def draw_spotlight():
+    spotlight = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    pygame.draw.circle(spotlight, (255, 255, 255, 80), (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2), 160)
+    screen.blit(spotlight, (0, 0))
+def draw_icon(label):
+    icon = ICONS.get(label, None)
+    if icon:
+        rect = icon.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
+        screen.blit(icon, rect)
+def draw_event_bubble(label, score):
+    bubble = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    bx, by = SCREEN_WIDTH // 2 - 260, SCREEN_HEIGHT // 2 + 160
+    pygame.draw.rect(bubble, (255, 255, 255, 200), (bx, by, 520, 110), border_radius=25)
+    text = f"{label}  ({score*100:.1f}%)"
+    surf = font_small.render(text, True, (0, 0, 0))
+    rect = surf.get_rect(center=(SCREEN_WIDTH // 2, by + 55))
+    bubble.blit(surf, rect)
+    screen.blit(bubble, (0, 0))
+# --------------------------------------------------
+# Initial Servo Settings
+# --------------------------------------------------
+try:
+    bot.Ctrl_Servo(1, 90)
+    bot.Ctrl_Servo(2, 25)
+except:
+    pass
+# --------------------------------------------------
+# Main Loop
+# --------------------------------------------------
+try:
+    with sd.InputStream(channels=1, samplerate=SR, blocksize=block_size, callback=audio_callback):
+        running = True
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_q:
+                    running = False
+            elapsed = time.time() - t_start
+            draw_glow_background(current_label, elapsed)
+            draw_spotlight()
+            draw_icon(current_label)
+            draw_event_bubble(current_label, current_score)
+            pygame.display.flip()
+            if current_label != "Background" and not is_acting:
+                pygame.display.flip()
+                perform_robot_action(current_label)
+                current_label = "Background"
+                current_score = 0.0
+            clock.tick(30)
+except KeyboardInterrupt:
+    print("Stopped")
+finally:
+    stop_robot()
+    pygame.quit()
