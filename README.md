@@ -1,4 +1,7 @@
 # ACDT_Project_G26
+
+VAVA(Verbal alert to Visual alert) Project
+
 It includes the information about how to run our products.
 
 Our model on web: https://teachablemachine.withgoogle.com/models/tWu4jmNKd/
